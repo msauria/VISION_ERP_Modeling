@@ -1,0 +1,9 @@
+channels:
+  - bioconda
+  - anaconda
+  - defaults
+dependencies:
+  - python>=3
+  - numpy
+  - scikit-learn
+  - matplotlib
