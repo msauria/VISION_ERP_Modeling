@@ -70,7 +70,8 @@ def plot(species, pdf):
                 results.append(numpy.zeros((2 * len(CTs), len(state_order)),
                                            dtype=numpy.float32))
                 for k, ct in enumerate(CTs):
-                    infile = open('Results_%s/%s_%s_%s_%s_0%s_betas.txt' % (
+                    #infile = open('Results_%s/%s_%s_%s_%s_0%s_betas.txt' % (
+                    infile = open('Results_%s_PCA/%s_%s_%s_%s_0%s_betas.txt' % (
                         species, species, f, ct, prefix, c), 'r')
                     line = infile.readline().split()
                     if len(line) == 3:

@@ -72,9 +72,13 @@ def main():
                         for j in range(len(fnames))[::-1]:
                             if fnames[j].count('control') == 0:
                                 fnames.pop(j)
+                    print(fnames)
                     for j in range(len(fnames)):
                         jobs_q.put((i, j, fnames[j]))
                         data[i].append(None)
+                if len(data[0]) == 0 and len(data[1]) == 0:
+                    continue
+                print(ct)
                 for i in range(N):
                     jobs_q.put(None)
                 results_q = multiprocessing.JoinableQueue()
@@ -261,6 +265,8 @@ def main():
                 pdf.savefig()
                 plt.close()
 
+            if len(cre_sets) < 2:
+                continue
             data0, cre_set0 = find_cre_freq(cre_sets, 0)
             data1, cre_set1 = find_cre_freq(cre_sets, 1)
             hm0 = numpy.histogram2d(data0[:, 0], data0[:, 1],
@@ -273,6 +279,8 @@ def main():
                                     density=False)[0]
             hm0 /= numpy.amax(hm0)
             hm1 /= numpy.amax(hm1)
+            hm0 = numpy.log2(hm0 + 1)
+            hm1 = numpy.log2(hm1 + 1)
             fig = plt.figure(constrained_layout=True)
             fig.suptitle("%s CRE-TSS Pair Selection" % species_name)
             gs = fig.add_gridspec(2, 2, height_ratios=[1, 10])
@@ -281,31 +289,31 @@ def main():
                 ax.imshow(hm, cmap='magma', norm=Normalize(0, 1))
             pdf.savefig()
             plt.close()
-        #where = numpy.where(numpy.logical_and(data0[:, 0] >= 0.8, data0[:, 1] >= 0.8))[0]
-        where = numpy.arange(data0.shape[0])
-        scores = data0[where, 0] * data0[where, 1] / float(len(cre_sets[0][0]) * len(cre_sets))
-        scores /= numpy.amax(scores)
-        scores = numpy.round(scores * 1000.99 - 0.5).astype(numpy.int32)
-        value1 = data0[where, 0]
-        value2 = data0[where, 1]
-        tss_i = cre_set0[where] // creN
-        cre_i = cre_set0[where] - tss_i * creN
-        output = open(out_fname.replace('.pdf', '.int'), 'w')
-        print('track type=interact name="%s TSS-CRE" description="%s TSS-CRE" interactDirectional=true maxHeightPixels=200:100:50 useScore=on visibility=full' % (species_name, species_name), file=output)
-        print('#chrom  chromStart  chromEnd  name  score  numReps numCTs  exp  color  sourceChrom  sourceStart  sourceEnd  sourceName  sourceStrand  targetChrom  targetStart  targetEnd  targetName  targetStrand', file=output)
-        bool2strand = {False: "+", True: "-"}
-        for i in range(tss_i.shape[0]):
-            ti = tss_i[i]
-            ci = cre_i[i]
-            tss = model.rna['TSS'][ti]
-            chrom = model.rna['chr'][ti].decode('utf8')
-            strand = bool2strand[model.rna['strand'][ti]]
-            start = model.cre['start'][ci]
-            end = model.cre['end'][ci]
-            print("%s\t%i\t%i\t.\t%i\t%i\t%i\t.\t0\t%s\t%i\t%i\t.\t.\t%s\t%i\t%i\t.\t%s" %
-                  (chrom, min(tss, start), max(tss + 1, end), scores[i], value1[i], value2[i], chrom,
-                   start, end, chrom, tss, tss + 1, strand), file=output)
-        output.close()
+            #where = numpy.where(numpy.logical_and(data0[:, 0] >= 0.8, data0[:, 1] >= 0.8))[0]
+            where = numpy.arange(data0.shape[0])
+            scores = data0[where, 0] * data0[where, 1] / float(len(cre_sets[0][0]) * len(cre_sets))
+            scores /= numpy.amax(scores)
+            scores = numpy.round(scores * 1000.99 - 0.5).astype(numpy.int32)
+            value1 = data0[where, 0]
+            value2 = data0[where, 1]
+            tss_i = cre_set0[where] // creN
+            cre_i = cre_set0[where] - tss_i * creN
+            output = open(out_fname.replace('.pdf', '.int'), 'w')
+            print('track type=interact name="%s TSS-CRE" description="%s TSS-CRE" interactDirectional=true maxHeightPixels=200:100:50 useScore=on visibility=full' % (species_name, species_name), file=output)
+            print('#chrom  chromStart  chromEnd  name  score  numReps numCTs  exp  color  sourceChrom  sourceStart  sourceEnd  sourceName  sourceStrand  targetChrom  targetStart  targetEnd  targetName  targetStrand', file=output)
+            bool2strand = {False: "+", True: "-"}
+            for i in range(tss_i.shape[0]):
+                ti = tss_i[i]
+                ci = cre_i[i]
+                tss = model.rna['TSS'][ti]
+                chrom = model.rna['chr'][ti].decode('utf8')
+                strand = bool2strand[model.rna['strand'][ti]]
+                start = model.cre['start'][ci]
+                end = model.cre['end'][ci]
+                print("%s\t%i\t%i\t.\t%i\t%i\t%i\t.\t0\t%s\t%i\t%i\t.\t.\t%s\t%i\t%i\t.\t%s" %
+                      (chrom, min(tss, start), max(tss + 1, end), scores[i], value1[i], value2[i], chrom,
+                       start, end, chrom, tss, tss + 1, strand), file=output)
+            output.close()
 
 def RGB2Hex(rgb):
     r, g, b = rgb
@@ -323,8 +331,9 @@ def find_pair_indices(jobs_q, results_q, tss_indices, cre_indices):
         f.readline()
         for line in f:
             line = line.rstrip().split()
-            temp.append(tss_indices[(line[0].decode('utf8'), int(line[1]))]
-                        + cre_indices[(line[0].decode('utf8'), int(line[3]))])
+            chrom = line[0].decode('utf8').strip("b'")
+            temp.append(tss_indices[(chrom, int(line[1]))]
+                        + cre_indices[(chrom, int(line[3]))])
         f.close()
         temp = numpy.array(temp)
         temp = numpy.unique(temp)

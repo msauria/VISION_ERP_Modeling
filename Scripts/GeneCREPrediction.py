@@ -16,8 +16,8 @@ def main():
     model = LinReg(args.rna, args.state, args.cre, args.verbose)
     model.run(args.output, args.init_dist, args.promoter_dist, args.cre_dist,
               args.cre_noprom, args.correlation, args.iterations, args.lessone,
-              args.threads, args.train_stats, args.eRP, args.max_cres,
-              args.skip_training, args.shuffle_states, args.seed)
+              args.threads, args.train_stats, args.eRP, args.max_cres, args.sum_cres,
+              args.skip_training, args.shuffle_states, args.pca, args.seed)
 
 def generate_parser():
     """Generate an argument parser."""
@@ -45,8 +45,12 @@ def generate_parser():
                         help="CRE distance cutoff")
     parser.add_argument('--cre-exclude-promoter', dest="cre_noprom", action='store_true',
                       help="Exclude promoter from CREs")
+    parser.add_argument('--sum-cres', dest="sum_cres", action='store_true',
+                      help="Sum CREs instead of finding overall proportions")
     parser.add_argument('--correlation', dest="correlation", type=float, action='store', default=0.0,
                         help="Initial correlation cutoff")
+    parser.add_argument('--pca', dest="pca", type=float, action='store',
+                        help="Convert state ratios into PCAs explaining this much variance")
     parser.add_argument('--trainstats', dest="train_stats", action='store_true',
                         help="Output training statistics")
     parser.add_argument('--max-CREs', dest="max_cres", action='store', type=int, default=0,
@@ -109,7 +113,7 @@ class LinReg(object):
     def run(self, out_prefix, initialization_dist=1000, promoter_dist=None,
         cre_dist=None, cre_noprom=False, corr_cutoff=0.2, refining_iter=100,
         lessone=0, threads=1, train_stats=False, eRP=None, max_cres=None,
-        skip_training=False, shuffle_states=False, seed=None):
+        sum_cres=False, skip_training=False, shuffle_states=False, pca=None, seed=None):
         self.lessone = lessone # Sample to hold out and predict at end
         self.lmask = numpy.r_[numpy.arange(lessone), numpy.arange((lessone + 1), self.cellN)] # Indices excluding lessone celltype
         self.shufflestates = bool(shuffle_states)
@@ -121,7 +125,7 @@ class LinReg(object):
         else:
             self.skip_cres = True
             if promoter_dist is None:
-                self.logger.error("You must either speficy a distance for CREs or promoters")
+                self.logger.error("You must either specify a distance for CREs or promoters")
                 sys.exit(0)
         if promoter_dist is not None:
             self.promoter_dist = int(promoter_dist) # Max distance from TSSs for promoter state assessment, if used
@@ -133,6 +137,7 @@ class LinReg(object):
         self.threads = max(1, int(threads)) # Number of threads to use
         self.trainstats = bool(train_stats) # Indicator whether to retain training statistics
         self.maxcres = int(max_cres)
+        self.sum_cres = bool(sum_cres)
         self.skip_training = bool(skip_training)
         self.out_prefix = str(out_prefix)
         self.seed = seed
@@ -171,6 +176,15 @@ class LinReg(object):
             self.assign_promoter_states()
         if not self.skip_cres:
             self.assign_CRE_states()
+        self.cre_stateN = None
+
+        if pca is not None:
+            if pca.is_integer():
+                self.pca = int(pca)
+            else:
+                self.pca = float(pca)
+        else:
+            self.pca = None
 
         if eRP is None:
             if not self.skip_cres:
@@ -180,6 +194,8 @@ class LinReg(object):
             self.reconstitute_pairs(eRP)
         if not self.skip_cres and not self.skip_training:
             self.refine_pairs()
+        elif not self.pca is None:
+            self.find_PCAs()
         self.predict_lessone()
         self.write_settings()
 
@@ -597,6 +613,8 @@ class LinReg(object):
         self.TSS_indices = numpy.r_[0, numpy.cumsum(numpy.bincount(self.pairs[:, 0],
                                                                    minlength=self.tssN))]
         self.selected = numpy.ones(self.pairs.shape[0], dtype=numpy.bool)
+        if self.pca is not None:
+            self.find_PCAs()
         if self.maxcres > 0:
             where = numpy.where(self.TSS_indices[1:] - self.TSS_indices[:-1] > self.maxcres)[0]
             for i in where:
@@ -673,7 +691,7 @@ class LinReg(object):
                 beta_queue.put((i, j, mask, X, Y))
             for i in range(self.threads):
                 beta_queue.put(None)
-            betas = numpy.zeros((self.cellN1, p), dtype=numpy.float32)
+            betas = numpy.zeros((self.cellN1, X.shape[2]), dtype=numpy.float32)
             pred_exp = numpy.zeros((self.tssN, self.cellN1), dtype=numpy.float32)
             finished = 0
             while finished < self.threads:
@@ -702,8 +720,6 @@ class LinReg(object):
             pair_queue = multiprocessing.JoinableQueue()
             results_queue = multiprocessing.JoinableQueue()
             processes = []
-            print("\n{} {}".format(betas[:, self.promoter_beta_indices[0]],
-                                   betas[:, self.cre_beta_indices[0]]))
             for i in range(self.threads):
                 processes.append(multiprocessing.Process(
                     target=self._refine_pair_CREs, args=(pair_queue, results_queue,
@@ -754,6 +770,8 @@ class LinReg(object):
             if changed_sum == 0:
                 break
             self.selected = new_selected
+            if self.pca is not None:
+                self.find_PCAs()
             XCs = self.find_Xs()
             X = numpy.dstack((self.XPrs, XCs[:, self.lmask, :]))
             X_l = numpy.hstack((self.XPrs_l, XCs[:, self.lessone, :]))
@@ -795,6 +813,7 @@ class LinReg(object):
         self.betas = best_betas
         self.R2adj = best_R2adj
         self.selected = best_selected
+        self.find_PCAs()
         if self.verbose >= 2:
             print("\r{}\r".format(' ' * 80), end='', file=sys.stderr)
         temp = numpy.bincount(self.pairs[:, 0], weights=self.selected, minlength=self.tssN)
@@ -808,21 +827,70 @@ class LinReg(object):
         self.logger.info("Unique CREs in pairings: {}".format(
                          numpy.unique(self.pairs[numpy.where(self.selected)[0], 1]).shape[0]))
 
-    def find_Xs(self):
+    def find_Xs(self, raw=False):
         if self.skip_cres:
             XCs = numpy.zeros((self.tssN, self.cellN, 0), dtype=numpy.float32)
             return XCs
+
+        if raw and self.cre_stateN is not None:
+            stateN = self.cre_stateN
+            Cstates = self.cre_Cstates
         else:
-            XCs = numpy.zeros((self.tssN, self.cellN, self.stateN),
-                              dtype=numpy.float32)
+            stateN = self.stateN
+            Cstates = self.Cstates
+        XCs = numpy.zeros((self.tssN, self.cellN, stateN),
+                          dtype=numpy.float32)
         for i in range(self.tssN):
             s = self.TSS_indices[i]
             e = self.TSS_indices[i + 1]
             valid = numpy.where(self.selected[s:e])[0] + s
             if valid.shape[0] > 0:
-                XCs[i, :, :] = numpy.sum(self.Cstates[self.pairs[valid, 1], :, :], axis=0)
-        XCs = XCs / numpy.maximum(1e-5, numpy.sum(XCs, axis=2, keepdims=True))
+                XCs[i, :, :] = numpy.sum(Cstates[self.pairs[valid, 1], :, :], axis=0)
+        if self.sum_cres:
+            XCs /= 200
+        else:
+            XCs /= numpy.maximum(1e-5, numpy.sum(XCs, axis=2, keepdims=True))
         return XCs
+
+    def find_PCAs(self):
+        if self.cre_stateN is None:
+            self.cre_stateN = self.stateN
+            self.cre_XPrs = numpy.copy(self.XPrs)
+            if not self.skip_cres:
+                self.cre_Cstates = numpy.copy(self.Cstates)
+            if not self.skip_promoter:
+                self.cre_Pstates = numpy.copy(self.Pstates)
+        if not self.skip_cres:
+            XCs = self.find_Xs(raw=True)[:, self.lmask, :]
+            if not self.skip_promoter:
+                X = numpy.vstack((XCs, self.cre_XPrs)).reshape(-1, self.cre_stateN)
+            else:
+                X = XCs.reshape(-1, self.cre_stateN)
+        else:
+            X = self.cre_XPrs.reshape(-1, self.cre_stateN)
+        if isinstance(self.pca, float):
+            PCA = sklearn.decomposition.PCA(whiten=True, svd_solver='full')
+            PCA.fit(X)
+            n = max(1, numpy.searchsorted(numpy.cumsum(PCA.explained_variance_ratio_),
+                                                       self.pca, side='left') + 1)
+            PCA = sklearn.decomposition.PCA(n, whiten=True, svd_solver='full')
+        else:
+            PCA = sklearn.decomposition.PCA(self.pca, whiten=True, svd_solver='full')
+        PCA.fit(X)
+        self.stateN = PCA.n_components_
+        variance_explained = PCA.explained_variance_ratio_
+        if not self.skip_promoter:
+            self.Pstates = numpy.ascontiguousarray(PCA.transform(
+                self.cre_Pstates.reshape(-1, self.cre_stateN))).reshape(self.tssN, self.cellN, -1)
+            self.XPrs = self.Pstates[:, self.lmask, :]
+            self.XPrs_l = self.Pstates[:, self.lessone, :]
+            self.promoter_beta_indices = numpy.arange(self.stateN)
+        if not self.skip_cres:
+            self.Cstates = numpy.ascontiguousarray(PCA.transform(
+                self.cre_Cstates.reshape(-1, self.cre_stateN))).reshape(self.cre.shape[0], self.cellN, -1)
+            self.cre_beta_indices = (numpy.arange(self.stateN) + len(self.promoter_beta_indices))
+        self.logger.info("Converted {} states to {} PCAs ({:02.2f}% variance explained)".format(
+                         self.cre_stateN, self.stateN, 100*numpy.sum(variance_explained[:self.stateN])))
 
     def reconstitute_pairs(self, fname):
         if self.verbose >= 2:
@@ -891,10 +959,12 @@ class LinReg(object):
         R2adj = 1 - (1 - R2) * (n - 1) / (n - p - 1)
         R2_l = numpy.mean(y_l * Y_l) ** 2 / (var_y_l * var_Y_l)
         R2adj_l = 1 - (1 - R2_l) * (n_l - 1) / (n_l - p - 1)
+        self.logger.info("Adjusted-R2: {:02.2f}  Outgroup Adjusted-R2: {:02.2f}".format(
+                         R2adj*100, R2adj_l*100))
         output = open('{}_statistics.txt'.format(self.out_prefix), 'w')
         if self.skip_cres:
             print("R2adj\tMSE\tOut_R2adj\tOut_MSE", file=output)
-            print("\t".join(R2adj*100., MSE, R2adj_l*100., MSE_l), file=output)
+            print("{}\t{}\t{}\t{}".format(R2adj*100., MSE, R2adj_l*100., MSE_l), file=output)
         else:
             temp = numpy.bincount(self.pairs[:, 0], weights=self.selected, minlength=self.tssN)
             print("R2adj\tMSE\tOut_R2adj\tOut_MSE\t#Retained\t#Possible\t%Retained\tMedian CREs/TSS",
@@ -944,7 +1014,12 @@ class LinReg(object):
                 if where.shape[0] == 0:
                     continue
                 Cstates = self.Cstates[self.pairs[where, 1], self.lessone, :]
-                eRP['eRP'][where2] = numpy.sum(Cstates * Cbetas, axis=1)
+                if self.sum_cres:
+                    eRP['eRP'][where2] = numpy.sum(Cstates * Cbetas, axis=1)
+                    eRP['eRP'][where2] /= numpy.maximum(1e-5, numpy.sum(Cstates,
+                                                                        axis=1))
+                else:
+                    eRP['eRP'][where2] = numpy.sum(Cstates * Cbetas, axis=1) / 200
                 eRP['chr'][where2] = self.rna['chr'][i]
                 eRP['TSS'][where2] = self.rna['TSS'][i]
                 eRP['strand'][where2] = self.rna['strand'][i]
@@ -1173,11 +1248,19 @@ class LinReg(object):
             mask = numpy.copy(selected)
             for i in range(mask.shape[0]):
                 if not mask[i]:
+                    if self.sum_cres:
                         XCs = ((XC_sum + numpy.sum(Cstates[i, :, :] * Cbetas, axis=1))
                               / (XC_total + numpy.sum(Cstates[i, :, :], axis=1)))
+                    else:
+                        XCs = ((XC_sum + numpy.sum(Cstates[i, :, :] * Cbetas, axis=1))
+                              / 200)
                 else:
+                    if self.sum_cres:
                         XCs = ((XC_sum - numpy.sum(Cstates[i, :, :] * Cbetas, axis=1))
                               / numpy.maximum(1e-5, XC_total - numpy.sum(Cstates[i, :, :], axis=1)))
+                    else:
+                        XCs = ((XC_sum - numpy.sum(Cstates[i, :, :] * Cbetas, axis=1))
+                              / 200)
                 pred_exp = base_exp + XCs
                 mse[i] = numpy.sum((Y - pred_exp) ** 2)
             change = numpy.where(mse < total_mse)[0]

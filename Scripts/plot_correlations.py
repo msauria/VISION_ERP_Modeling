@@ -23,28 +23,39 @@ def plot(species, pdf):
                "LSK", "MEP", "MK-imm-ad", "MONO", "NEU"]
     conds = ['', '_control']
     features = ['all', 'nodiff', 'diff']
+    results = {}
+    minY = numpy.inf
+    maxY = -numpy.inf
     for prefix, plabel in [['both', 'CRE + Promoter'], ['cre', 'CRE only'], ['promoter', 'Promoter only']]:
-        results = numpy.zeros((len(conds), len(features), len(CTs)), dtype=numpy.float32)
+        results[prefix] = numpy.zeros((len(conds), len(features), len(CTs)), dtype=numpy.float32)
         for j, f in enumerate(features):
             for i, c in enumerate(conds):
                 for k, ct in enumerate(CTs):
                     #fname = 'Results/%s_%s_%snopromoter%s_statistics.txt' % (species, ct, f, c)
-                    fname = 'Results_%s/%s_%s_%s_%s_0%s_statistics.txt' % (
-                        species, species, f, ct, prefix, c)
+                    #fname = 'Results_%s/%s_%s_%s_%s_0%s_statistics.txt' % (
+                    #    species, species, f, ct, prefix, c)
+                    fname = 'Results_hg38_PCA/%s_%s_%s_%s_0%s_statistics.txt' % (
+                        species, f, ct, prefix, c)
                     if not os.path.exists(fname):
-                        results[i, j, k] = numpy.nan
+                        results[prefix][i, j, k] = numpy.nan
                         print("Missing %s" % fname)
                     else:
                         infile = open(fname, 'r')
                         infile.readline()
-                        results[i, j, k] = float(infile.readline().rstrip().split()[2])
-                results[i, j, numpy.where(numpy.isnan(results[i, j, :]))[0]] = numpy.mean(
-                    results[i, j, numpy.where(numpy.logical_not(numpy.isnan(results[i, j, :])))[0]])
-        results[numpy.where(numpy.isnan(results))] = numpy.mean(results[numpy.where(numpy.logical_not(numpy.isnan(results)))])
+                        results[prefix][i, j, k] = float(infile.readline().rstrip().split()[2])
+                results[prefix][i, j, numpy.where(numpy.isnan(results[prefix][i, j, :]))[0]] = numpy.mean(
+                    results[prefix][i, j, numpy.where(numpy.logical_not(numpy.isnan(results[prefix][i, j, :])))[0]])
+        results[prefix][numpy.where(numpy.isnan(results[prefix]))] = numpy.mean(results[prefix][numpy.where(numpy.logical_not(numpy.isnan(results[prefix])))])
+        minY = min(numpy.amin(results[prefix]), minY)
+        maxY = max(numpy.amax(results[prefix]), maxY)
+    span = maxY - minY
+    minY -= 0.025 * span
+    maxY += 0.025 * span
+    for prefix, plabel in [['both', 'CRE + Promoter'], ['cre', 'CRE only'], ['promoter', 'Promoter only']]:
         cond_labels = ['Normal', 'Shuffled CRE States']
         feature_labels = ['All Genes', 'Non-differentially Expressed Genes', 'Differentially Expressed Genes']
         colors = ['#E5007A', '#00E5FF', '#13FF00']
-        fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+        fig, ax = plt.subplots(1, 1, figsize=(7, 10))
         N = len(conds) * len(features)
         plt.grid(axis='y', color='gray')
         if species == 'hg38':
@@ -52,7 +63,7 @@ def plot(species, pdf):
         else:
             ax.set_title("Mouse Gene Expression Prediction - %s" % plabel)
         ax.set_ylabel('Correlation of gene expression:prediction')
-        data = tuple([results.reshape(N, -1)[x, :] for x in range(N)])
+        data = tuple([results[prefix].reshape(N, -1)[x, :] for x in range(N)])
         parts = ax.violinplot(data,
                               showmeans=False, showmedians=False, showextrema=False)
 
@@ -61,6 +72,7 @@ def plot(species, pdf):
         ax.set_xticks(numpy.arange(2, len(features) * len(conds), 3))
         ax.set_xticklabels(cond_labels)
         ax.set_xlim(0.5, len(conds) * len(features) + 0.5)
+        ax.set_ylim(minY, maxY)
         box = ax.get_position()
         ax.set_position([box.x0, box.y0 + box.height * 0.2, box.width, box.height * 0.8])
         offset = box.width * fig.get_size_inches()[0] * fig.dpi / (1.4 * len(conds) * len(features)) / 4
